@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DeskMonitor – Live</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;margin:20px;background:#0b0f14;color:#e6eef7}
+h1{margin:0 0 12px;font-weight:700}
+.row{display:flex;gap:16px;flex-wrap:wrap}
+.card{background:#121821;border:1px solid #1d2733;border-radius:12px;padding:14px;flex:1 1 520px;box-shadow:0 1px 8px rgba(0,0,0,.3)}
+table{width:100%;border-collapse:collapse;margin-top:8px;font-variant-numeric:tabular-nums}
+th,td{padding:8px 10px;border-bottom:1px solid #1d2733} th{text-align:left;background:#121821;position:sticky;top:0}
+tr:hover{background:#0f141c}
+.pos{color:#50d37d}.neg{color:#ff6b6b}.muted{opacity:.7}
+input,select{background:#0f141c;border:1px solid #1d2733;color:#e6eef7;border-radius:8px;padding:8px}
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.badge{padding:2px 8px;border:1px solid #1d2733;border-radius:999px;font-size:12px}
+.badge.ok{color:#50d37d;border-color:#205030}
+.badge.err{color:#ff6b6b;border-color:#552222}
+</style>
+</head>
+<body>
+<h1>DeskMonitor – Live feed</h1>
+
+<div class="row">
+  <div class="card">
+    <div class="controls">
+      <label>Filtr: <input id="q" placeholder="np. GBP, XAU, NAS"></label>
+      <label>Okno:
+        <select id="win">
+          <option value="5">5 min</option>
+          <option value="15" selected>15 min</option>
+          <option value="30">30 min</option>
+          <option value="60">60 min</option>
+        </select>
+      </label>
+      <span id="stats" class="badge muted">⏳ inicjalizacja...</span>
+    </div>
+    <table id="tbl">
+      <thead><tr><th>Instrument</th><th>Ostatnia cena</th><th>Zmiana %</th><th>Aktualizacja</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="controls"><strong>Top movers</strong><span id="ts" class="badge muted"></span></div>
+    <table id="movers">
+      <thead><tr><th>#</th><th>Instrument</th><th>Zmiana %</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="muted">Auto-odświeżanie co 5 s. Historia ~6 h w pamięci przeglądarki.</p>
+  </div>
+</div>
+
+<script>
+const FEED_URL = "https://deskmonitor-feed-1.onrender.com/feed";   // endpoint JSON
+const POLL_MS  = 5000;      // odświeżanie 5 s
+const HISTORY_HOURS = 6;    // magazyn danych: 6 h
+const store = new Map();
+let lastFetchOk = false, lastFetchTime = 0;
+
+function parseFeed(text){
+  try {
+    const d = JSON.parse(text);
+    return Array.isArray(d) ? d : [];
+  } catch {
+    const out = [];
+    const re = /\{[^}]+\}/g; let m;
+    while ((m = re.exec(text)) !== null) try { out.push(JSON.parse(m[0])) } catch {}
+    return out;
+  }
+}
+
+async function pull(){
+  const st = document.getElementById("stats");
+  try {
+    const r = await fetch(FEED_URL, { cache:"no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const txt = await r.text();
+    const arr = parseFeed(txt).filter(x =>
+      x && (x.status==="LIVE" || x.price) && typeof x.instrument==="string" && isFinite(+x.price)
+    );
+    const now = Date.now();
+    const cutoff = now - HISTORY_HOURS * 3600 * 1000;
+
+    for (const it of arr){
+      const k = it.instrument.trim();
+      const series = store.get(k) || [];
+      series.push({ ts: now, price: +it.price });
+      while (series.length && series[0].ts < cutoff) series.shift();
+      store.set(k, series);
+    }
+
+    lastFetchOk = true;
+    lastFetchTime = now;
+    st.textContent = `✅ ${arr.length} instrumentów • ${new Date().toLocaleTimeString()}`;
+    st.className = "badge ok";
+    render();
+  } catch(err){
+    console.error("Feed error:", err);
+    lastFetchOk = false;
+    st.textContent = `❌ brak połączenia (${new Date().toLocaleTimeString()})`;
+    st.className = "badge err";
+  }
+}
+
+function pct(a,b){return b===0?0:(a-b)/b*100;}
+function computeChange(series,min){
+  if(!series.length) return null;
+  const now=Date.now(), from=now-min*60*1000;
+  let first=null, last=series[series.length-1].price;
+  for(let i=series.length-1;i>=0;i--){ if(series[i].ts<=from){ first=series[i].price; break; } }
+  if(first===null) first=series[0].price;
+  return pct(last, first);
+}
+function fmt(ms){ return new Date(ms).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) }
+
+function render(){
+  const q=document.getElementById('q').value.trim().toUpperCase();
+  const win=+document.getElementById('win').value;
+  const rows=[];
+  for(const [k,series] of store.entries()){
+    const last=series[series.length-1];
+    const ch=computeChange(series,win);
+    if(q && !k.toUpperCase().includes(q)) continue;
+    rows.push({instrument:k, price:last.price, change:ch, ts:last.ts});
+  }
+  rows.sort((a,b)=>a.instrument.localeCompare(b.instrument));
+  document.querySelector('#tbl tbody').innerHTML=rows.map(r=>`
+    <tr>
+      <td>${r.instrument}</td>
+      <td>${r.price.toFixed(5)}</td>
+      <td class="${(r.change??0)>=0?'pos':'neg'}">${isFinite(r.change)?r.change.toFixed(2)+'%':'—'}</td>
+      <td class="muted">${fmt(r.ts)}</td>
+      <td>${lastFetchOk?'LIVE':'—'}</td>
+    </tr>`).join('');
+
+  const movers=[...rows].filter(r=>isFinite(r.change))
+        .sort((a,b)=>Math.abs(b.change)-Math.abs(a.change)).slice(0,20);
+  document.querySelector('#movers tbody').innerHTML=movers.map((m,i)=>`
+    <tr><td class="muted">${i+1}</td><td>${m.instrument}</td>
+    <td class="${m.change>=0?'pos':'neg'}">${m.change.toFixed(2)}%</td></tr>`).join('');
+  document.getElementById('ts').textContent=`okno: ${win} min • ${fmt(Date.now())}`;
+}
+
+document.getElementById('q').addEventListener('input', render);
+document.getElementById('win').addEventListener('change', render);
+
+pull();
+setInterval(pull, POLL_MS);
+</script>
+</body>
+</html>
+
